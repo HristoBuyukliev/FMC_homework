@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Set, Dict
 from Bio import Entrez
 from datetime import datetime
 from tqdm import tqdm
@@ -32,9 +32,15 @@ class Author(BaseModel):
     first_name: str
     last_name: str
     name: str
-    affiliations: List[str]
-    articles: List[str]
+    affiliations: Set[str]
+    articles: Set[str]
     match: Optional[bool]
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
 
 
 def generate_date_pairs(start_year=1960):
@@ -86,27 +92,25 @@ def get_author_name(author: str):
 
 
 def process_record(record):
-    if "PubmedArticle" in record:
-        # we're supposed to have escaped this, but there's 2 where it's double nested
-        record = record["PubmedArticle"][0]
     article_info = {}
     try:
         article_info["title"] = record["MedlineCitation"]["Article"]["ArticleTitle"]
     except KeyError:
         article_info["title"] = "No title available"
-    article_info["pmid"] = record["MedlineCitation"]["PMID"].strip()
+    article_info["pmid"] = str(record["MedlineCitation"]["PMID"].strip())
     authors = record["MedlineCitation"]["Article"].get("AuthorList", [])
     author_list = []
     for author in authors:
         first_name, last_name = get_author_name(author)
         author_affiliations = author.get("AffiliationInfo", [])
-        author_affiliations = [aa.get("Affiliation", "") for aa in author_affiliations]
-        author_info = {
-            "first_name": first_name,
-            "last_name": last_name,
-            "name": f"{first_name} {last_name}",
-            "affiliations": author_affiliations,
-        }
+        author_affiliations = set([aa.get("Affiliation", "") for aa in author_affiliations])
+        author_info = Author(
+            first_name=first_name,
+            last_name=last_name,
+            name=f"{first_name} {last_name}",
+            affiliations=author_affiliations,
+            articles={article_info["pmid"]},
+        )
         author_list.append(author_info)
     article_info["authors"] = author_list
     pubmed_data = record.get("PubmedData", {})
@@ -163,28 +167,17 @@ def authored_by(article_info, author_name):
     return False
 
 
-deduped_authors = []
-affiliation_dict = defaultdict(set)
-# Collect affiliations for each author
-for author in authors:
-    affiliation_dict[author["name"]].update(author["affiliations"])
+deduped_authors = set(authors)
+print(f"After deduplication, we are left with {len(deduped_authors)} authors")
 
-# Deduplicate authors
-for author_name, affiliations in affiliation_dict.items():
-    author_info = next(a for a in authors if a["name"] == author_name)
-    matches_articles = [ai["pmid"] for ai in article_infos if ai["pmid"] in author_info.get("articles", [])]
-    deduped_authors.append(
-        Author(
-            name=author_name,
-            first_name=author_info["first_name"],
-            last_name=author_info["last_name"],
-            affiliations=list(affiliations),
-            articles=matches_articles,
-        )
-    )
-
-print(f"After deduplication, we are left with {len(authors)} authors")
-
+# make sure that each author has ALL of his article ids; and all of his affiliations
+# we'll do it linearly over the article_infos
+author_dict: Dict[str, Author] = {author.name: author for author in deduped_authors}
+for article in article_infos:
+    for author in article["authors"]:
+        author_dict[author.name].articles.add(article["pmid"])
+        author_dict[author.name].affiliations.update(author.affiliations)
+deduped_authors = list(author_dict.values())
 
 # Finally, see how many of these appear in the provided dataset:
 with open("person_profiles.json", "r") as rfile:
@@ -209,8 +202,8 @@ resulting_data = pd.DataFrame(
         "fullName": [author.name for author in deduped_authors],
         "firstName": [author.first_name for author in deduped_authors],
         "lastName": [author.last_name for author in deduped_authors],
-        "affiliations": [author.affiliations for author in deduped_authors],
-        "article_ids": [author.articles for author in deduped_authors],
+        "affiliations": [list(author.affiliations) for author in deduped_authors],
+        "article_ids": [list(author.articles) for author in deduped_authors],
         "foundMatch": [author.match for author in deduped_authors],
     }
 )
