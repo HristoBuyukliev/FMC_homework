@@ -1,0 +1,5 @@
+pandas
+json
+tqdm
+biopython
+pydantic
